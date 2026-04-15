@@ -1,6 +1,19 @@
 """
 Unit tests for HaulTruckAnalyzer and its pure helper functions.
 
+Test classes:
+    TestComputeCycleTime        - cycle time summation helper
+    TestComputeProductivity     - tonnes-per-hour productivity helper
+    TestIdentifyBottleneck      - dominant phase detection helper
+    TestComputeUtilization      - utilization rate helper
+    TestValidation              - DataFrame validation rules
+    TestEdgeCases               - edge cases via HaulTruckAnalyzer
+    TestPreprocessNormalisation - column alias normalisation
+    TestFleetSummary            - fleet-level aggregation
+    TestAnalyzePipeline         - end-to-end analyze() method
+    TestToDataframe             - result serialisation helper
+    TestTimestampSchema         - timestamp-schema (trip_id / timestamps) support
+
 Run with:
     pytest tests/test_analyzer.py -v
 """
@@ -23,6 +36,11 @@ from src.main import (
     compute_utilization,
     fleet_summary,
     identify_bottleneck,
+    _validate_no_missing_truck_ids,
+    _validate_timestamps_ordered,
+    _validate_payload_non_negative,
+    _validate_cycle_times_non_negative,
+    _validate_no_duplicate_truck_trip,
 )
 
 
@@ -49,7 +67,7 @@ def sample_row() -> pd.Series:
 
 @pytest.fixture()
 def minimal_df() -> pd.DataFrame:
-    """Minimal valid DataFrame for analyzer tests."""
+    """Minimal valid DataFrame using the standard schema."""
     return pd.DataFrame(
         {
             "cycle_id": ["C1", "C2", "C3"],
@@ -81,6 +99,35 @@ def single_truck_df() -> pd.DataFrame:
             "queue_time_min": [4.5, 4.0],
             "total_cycle_min": [51.7, 49.5],
             "distance_km": [4.2, 4.2],
+        }
+    )
+
+
+@pytest.fixture()
+def timestamp_schema_df() -> pd.DataFrame:
+    """Valid DataFrame in the timestamp schema (load_time_min aliases)."""
+    return pd.DataFrame(
+        {
+            "truck_id": ["TRK01", "TRK01", "TRK02"],
+            "trip_id": ["T001", "T002", "T003"],
+            "timestamp_start": [
+                "2026-01-05 06:00:00",
+                "2026-01-05 07:05:00",
+                "2026-01-05 06:05:00",
+            ],
+            "timestamp_end": [
+                "2026-01-05 06:50:18",
+                "2026-01-05 07:54:18",
+                "2026-01-05 06:59:54",
+            ],
+            "load_time_min": [8.2, 7.8, 7.5],
+            "haul_time_min": [18.5, 18.0, 20.1],
+            "dump_time_min": [3.1, 2.9, 2.8],
+            "return_time_min": [16.0, 15.5, 18.3],
+            "payload_tonnes": [220.5, 225.0, 185.0],
+            "haul_distance_km": [4.2, 4.2, 4.8],
+            "material_type": ["Coal", "Coal", "Coal"],
+            "pit_name": ["North Pit", "North Pit", "East Pit"],
         }
     )
 
@@ -149,6 +196,33 @@ class TestComputeCycleTime:
         row = pd.Series({"truck_id": "T1", "load_tonnes": 200.0})
         assert compute_cycle_time(row) == 0.0
 
+    def test_null_time_values_treated_as_zero(self) -> None:
+        """NaN time components should contribute 0.0 to the total."""
+        row = pd.Series(
+            {
+                "loading_time_min": float("nan"),
+                "hauling_time_min": 18.0,
+                "dumping_time_min": 3.0,
+                "return_time_min": 16.0,
+            }
+        )
+        result = compute_cycle_time(row)
+        assert result == pytest.approx(37.0, rel=1e-4)
+
+    def test_large_realistic_cycle_time(self) -> None:
+        """A Liebherr T 284 hauling over 5 km should produce a plausible total."""
+        row = pd.Series(
+            {
+                "loading_time_min": 11.0,
+                "hauling_time_min": 23.1,
+                "dumping_time_min": 4.2,
+                "return_time_min": 21.5,
+                "queue_time_min": 8.0,
+            }
+        )
+        result = compute_cycle_time(row)
+        assert result == pytest.approx(67.8, rel=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # Test 2 – Productivity metrics (tonnes / hour)
@@ -180,6 +254,17 @@ class TestComputeProductivity:
         """Negative tonnes is nonsensical; function must return 0.0."""
         assert compute_productivity(-50.0, 50.0) == 0.0
 
+    def test_liebherr_productivity_range(self) -> None:
+        """Liebherr T 284 payload of ~290 t with ~65 min cycle is realistic."""
+        result = compute_productivity(290.0, 65.0)
+        # Expect roughly 267 t/h
+        assert 250.0 < result < 290.0
+
+    def test_komatsu_hd785_productivity(self) -> None:
+        """Komatsu HD785 at 91 t payload and 55 min cycle produces ~99 t/h."""
+        result = compute_productivity(91.0, 55.0)
+        assert result == pytest.approx((91.0 / 55.0) * 60.0, rel=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # Test 3 – Bottleneck identification
@@ -205,6 +290,30 @@ class TestIdentifyBottleneck:
             }
         )
         assert identify_bottleneck(row) == "queue_time_min"
+
+    def test_loading_is_dominant(self) -> None:
+        """loading_time_min dominates when it exceeds all other phases."""
+        row = pd.Series(
+            {
+                "loading_time_min": 30.0,
+                "hauling_time_min": 18.0,
+                "dumping_time_min": 3.0,
+                "return_time_min": 16.0,
+            }
+        )
+        assert identify_bottleneck(row) == "loading_time_min"
+
+    def test_return_is_dominant(self) -> None:
+        """return_time_min dominates on long empty-return routes."""
+        row = pd.Series(
+            {
+                "loading_time_min": 8.0,
+                "hauling_time_min": 18.0,
+                "dumping_time_min": 3.0,
+                "return_time_min": 35.0,
+            }
+        )
+        assert identify_bottleneck(row) == "return_time_min"
 
     def test_all_zero_returns_unknown(self) -> None:
         """All-zero times have no bottleneck; returns 'unknown'."""
@@ -241,6 +350,10 @@ class TestComputeUtilization:
         """Active time equal to available time must return exactly 100.0."""
         assert compute_utilization(720.0, 720.0) == pytest.approx(100.0)
 
+    def test_over_utilization_capped_at_100(self) -> None:
+        """Active time exceeding available must be capped at 100.0."""
+        assert compute_utilization(800.0, 720.0) == pytest.approx(100.0)
+
     def test_zero_available_time_returns_zero(self) -> None:
         """Zero available time must not cause a division by zero error."""
         assert compute_utilization(100.0, 0.0) == 0.0
@@ -253,9 +366,166 @@ class TestComputeUtilization:
         """Zero active time means the truck was idle the entire shift."""
         assert compute_utilization(0.0, 720.0) == 0.0
 
+    def test_half_shift_utilization(self) -> None:
+        """360 min active out of 720 available equals exactly 50.0 %."""
+        assert compute_utilization(360.0, 720.0) == pytest.approx(50.0)
+
 
 # ---------------------------------------------------------------------------
-# Test 5 – Edge cases: zero times, negative distances
+# Test 5 – Input validation helpers
+# ---------------------------------------------------------------------------
+
+
+class TestValidation:
+    """Tests for low-level validation helper functions and HaulTruckAnalyzer.validate."""
+
+    def test_validate_empty_df_raises(self, analyzer: HaulTruckAnalyzer) -> None:
+        """Empty DataFrame must raise ValueError with 'empty' in message."""
+        with pytest.raises(ValueError, match="empty"):
+            analyzer.validate(pd.DataFrame())
+
+    def test_validate_missing_required_columns_raises(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """DataFrame missing all required time columns must raise ValueError."""
+        df = pd.DataFrame({"truck_id": ["T1"], "load_tonnes": [200.0]})
+        with pytest.raises(ValueError, match="Missing required time columns"):
+            analyzer.validate(df)
+
+    def test_validate_missing_truck_id_raises(self) -> None:
+        """Null truck_id values must raise ValueError."""
+        df = pd.DataFrame(
+            {
+                "truck_id": [None, "T2"],
+                "loading_time_min": [8.0, 8.0],
+                "hauling_time_min": [18.0, 18.0],
+                "dumping_time_min": [3.0, 3.0],
+                "return_time_min": [16.0, 16.0],
+            }
+        )
+        with pytest.raises(ValueError, match="Missing or blank truck_id"):
+            _validate_no_missing_truck_ids(df)
+
+    def test_validate_blank_string_truck_id_raises(self) -> None:
+        """Blank-string truck_id (spaces only) must also be rejected."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["   ", "T2"],
+                "loading_time_min": [8.0, 8.0],
+            }
+        )
+        with pytest.raises(ValueError, match="Missing or blank truck_id"):
+            _validate_no_missing_truck_ids(df)
+
+    def test_validate_timestamps_out_of_order_raises(self) -> None:
+        """timestamp_end before timestamp_start must raise ValueError."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "timestamp_start": ["2026-01-05 07:00:00"],
+                "timestamp_end": ["2026-01-05 06:00:00"],  # end before start
+            }
+        )
+        with pytest.raises(ValueError, match="timestamp_end is not after timestamp_start"):
+            _validate_timestamps_ordered(df)
+
+    def test_validate_equal_timestamps_raises(self) -> None:
+        """timestamp_end equal to timestamp_start (zero duration) must raise."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "timestamp_start": ["2026-01-05 06:00:00"],
+                "timestamp_end": ["2026-01-05 06:00:00"],
+            }
+        )
+        with pytest.raises(ValueError, match="timestamp_end is not after timestamp_start"):
+            _validate_timestamps_ordered(df)
+
+    def test_validate_timestamps_in_order_passes(self) -> None:
+        """Correctly ordered timestamps must pass without raising."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "timestamp_start": ["2026-01-05 06:00:00"],
+                "timestamp_end": ["2026-01-05 06:50:00"],
+            }
+        )
+        _validate_timestamps_ordered(df)  # must not raise
+
+    def test_validate_negative_payload_raises(self) -> None:
+        """Negative payload_tonnes values must raise ValueError."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "payload_tonnes": [-100.0],
+            }
+        )
+        with pytest.raises(ValueError, match="Negative payload values"):
+            _validate_payload_non_negative(df)
+
+    def test_validate_negative_load_tonnes_raises(self) -> None:
+        """Negative load_tonnes values must raise ValueError."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "load_tonnes": [-50.0],
+            }
+        )
+        with pytest.raises(ValueError, match="Negative payload values"):
+            _validate_payload_non_negative(df)
+
+    def test_validate_zero_payload_passes(self) -> None:
+        """Zero payload must be allowed (truck ran empty – valid edge case)."""
+        df = pd.DataFrame({"truck_id": ["T1"], "load_tonnes": [0.0]})
+        _validate_payload_non_negative(df)  # must not raise
+
+    def test_validate_negative_cycle_time_raises_in_strict_mode(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """Negative cycle times must raise ValueError when strict_validation=True."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "loading_time_min": [-5.0],
+                "hauling_time_min": [18.0],
+                "dumping_time_min": [3.0],
+                "return_time_min": [16.0],
+            }
+        )
+        with pytest.raises(ValueError, match="Negative cycle time values"):
+            _validate_cycle_times_non_negative(df)
+
+    def test_validate_passes_for_valid_df(
+        self, analyzer: HaulTruckAnalyzer, minimal_df: pd.DataFrame
+    ) -> None:
+        """validate() on a clean DataFrame must return True without raising."""
+        assert analyzer.validate(minimal_df) is True
+
+    def test_validate_duplicate_truck_trip_raises(self) -> None:
+        """Duplicate (truck_id, trip_id) pairs must raise ValueError."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1", "T1"],
+                "trip_id": ["TR01", "TR01"],
+                "loading_time_min": [8.0, 8.0],
+            }
+        )
+        with pytest.raises(ValueError, match="Duplicate"):
+            _validate_no_duplicate_truck_trip(df)
+
+    def test_validate_no_duplicate_truck_trip_passes(self) -> None:
+        """Unique (truck_id, trip_id) pairs must pass without error."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1", "T1", "T2"],
+                "trip_id": ["TR01", "TR02", "TR01"],
+            }
+        )
+        _validate_no_duplicate_truck_trip(df)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Test 6 – Edge cases
 # ---------------------------------------------------------------------------
 
 
@@ -295,6 +565,23 @@ class TestEdgeCases:
         preprocessed = analyzer.preprocess(df)
         assert (preprocessed["distance_km"] >= 0.0).all()
 
+    def test_negative_haul_distance_km_alias_clamped(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """Negative haul_distance_km (alias) must also be clamped to 0."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "load_time_min": [8.0],
+                "haul_time_min": [18.0],
+                "dump_time_min": [3.0],
+                "return_time_min": [16.0],
+                "haul_distance_km": [-3.5],
+            }
+        )
+        preprocessed = analyzer.preprocess(df)
+        assert preprocessed["distance_km"].iloc[0] == 0.0
+
     def test_missing_cycles_in_df(self, analyzer: HaulTruckAnalyzer) -> None:
         """Empty DataFrame should raise ValueError on validate."""
         with pytest.raises(ValueError, match="empty"):
@@ -313,12 +600,135 @@ class TestEdgeCases:
         )
         original_value = original["loading_time_min"].iloc[0]
         _ = analyzer.preprocess(original)
-        # Original must be unchanged
         assert original["loading_time_min"].iloc[0] == original_value
+
+    def test_single_row_df_does_not_raise(self, analyzer: HaulTruckAnalyzer) -> None:
+        """A single-row DataFrame must be processed without error."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["TRK01"],
+                "load_tonnes": [220.5],
+                "loading_time_min": [8.2],
+                "hauling_time_min": [18.5],
+                "dumping_time_min": [3.1],
+                "return_time_min": [16.0],
+            }
+        )
+        result = analyzer.analyze(df)
+        assert result["total_records"] == 1
+
+    def test_non_strict_mode_allows_negative_times(self) -> None:
+        """With strict_validation=False, negative times should not raise on validate."""
+        analyzer = HaulTruckAnalyzer(config={"strict_validation": False})
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "loading_time_min": [-5.0],
+                "hauling_time_min": [18.0],
+                "dumping_time_min": [3.0],
+                "return_time_min": [16.0],
+            }
+        )
+        # Should not raise
+        result = analyzer.validate(df)
+        assert result is True
 
 
 # ---------------------------------------------------------------------------
-# Test 6 – Fleet summary statistics
+# Test 7 – Preprocessing and column alias normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestPreprocessNormalisation:
+    """Tests for column alias handling in preprocess()."""
+
+    def test_load_time_min_renamed_to_loading_time_min(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """load_time_min alias must be renamed to loading_time_min."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "load_time_min": [8.0],
+                "haul_time_min": [18.0],
+                "dump_time_min": [3.0],
+                "return_time_min": [16.0],
+            }
+        )
+        preprocessed = analyzer.preprocess(df)
+        assert "loading_time_min" in preprocessed.columns
+        assert "load_time_min" not in preprocessed.columns
+
+    def test_payload_tonnes_renamed_to_load_tonnes(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """payload_tonnes alias must be renamed to load_tonnes."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "loading_time_min": [8.0],
+                "hauling_time_min": [18.0],
+                "dumping_time_min": [3.0],
+                "return_time_min": [16.0],
+                "payload_tonnes": [220.5],
+            }
+        )
+        preprocessed = analyzer.preprocess(df)
+        assert "load_tonnes" in preprocessed.columns
+        assert "payload_tonnes" not in preprocessed.columns
+
+    def test_haul_distance_km_renamed_to_distance_km(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """haul_distance_km alias must be renamed to distance_km."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "loading_time_min": [8.0],
+                "hauling_time_min": [18.0],
+                "dumping_time_min": [3.0],
+                "return_time_min": [16.0],
+                "haul_distance_km": [4.2],
+            }
+        )
+        preprocessed = analyzer.preprocess(df)
+        assert "distance_km" in preprocessed.columns
+        assert "haul_distance_km" not in preprocessed.columns
+
+    def test_fully_empty_rows_dropped(self, analyzer: HaulTruckAnalyzer) -> None:
+        """Fully empty rows (all NaN) must be dropped during preprocessing."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1", None],
+                "loading_time_min": [8.0, None],
+                "hauling_time_min": [18.0, None],
+                "dumping_time_min": [3.0, None],
+                "return_time_min": [16.0, None],
+            }
+        )
+        preprocessed = analyzer.preprocess(df)
+        assert len(preprocessed) == 1
+
+    def test_negative_payload_tonnes_clamped_in_preprocess(
+        self, analyzer: HaulTruckAnalyzer
+    ) -> None:
+        """Negative payload_tonnes values must be clamped to 0 after preprocessing."""
+        df = pd.DataFrame(
+            {
+                "truck_id": ["T1"],
+                "loading_time_min": [8.0],
+                "hauling_time_min": [18.0],
+                "dumping_time_min": [3.0],
+                "return_time_min": [16.0],
+                "payload_tonnes": [-50.0],
+            }
+        )
+        preprocessed = analyzer.preprocess(df)
+        assert preprocessed["load_tonnes"].iloc[0] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 8 – Fleet summary statistics
 # ---------------------------------------------------------------------------
 
 
@@ -337,7 +747,6 @@ class TestFleetSummary:
         analyzer = HaulTruckAnalyzer()
         enriched = analyzer.enrich(analyzer.preprocess(minimal_df))
         summary = fleet_summary(enriched)
-        # T1 has 2 cycles, T2 has 1
         assert summary.loc["T1", "cycle_count"] == 2
         assert summary.loc["T2", "cycle_count"] == 1
 
@@ -362,9 +771,23 @@ class TestFleetSummary:
         expected_t1_tonnes = minimal_df[minimal_df["truck_id"] == "T1"]["load_tonnes"].sum()
         assert summary.loc["T1", "total_tonnes"] == pytest.approx(expected_t1_tonnes, rel=1e-3)
 
+    def test_avg_cycle_min_is_positive(self, minimal_df: pd.DataFrame) -> None:
+        """Average cycle time in the summary must be positive for all trucks."""
+        analyzer = HaulTruckAnalyzer()
+        enriched = analyzer.enrich(analyzer.preprocess(minimal_df))
+        summary = fleet_summary(enriched)
+        assert (summary["avg_cycle_min"] > 0).all()
+
+    def test_avg_productivity_tph_positive(self, minimal_df: pd.DataFrame) -> None:
+        """Average productivity must be positive when payload is non-zero."""
+        analyzer = HaulTruckAnalyzer()
+        enriched = analyzer.enrich(analyzer.preprocess(minimal_df))
+        summary = fleet_summary(enriched)
+        assert (summary["avg_productivity_tph"] > 0).all()
+
 
 # ---------------------------------------------------------------------------
-# Test 7 – Full analyze pipeline
+# Test 9 – Full analyze pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -410,9 +833,88 @@ class TestAnalyzePipeline:
         result = analyzer.run(str(sample_path))
         assert result["total_records"] == 20
 
+    def test_fleet_summary_present_in_analyze(
+        self, analyzer: HaulTruckAnalyzer, minimal_df: pd.DataFrame
+    ) -> None:
+        """fleet_summary key must be present and non-empty after analyze."""
+        result = analyzer.analyze(minimal_df)
+        assert "fleet_summary" in result
+        assert result["fleet_summary"]
+
+    def test_analyze_with_timestamp_schema(
+        self, analyzer: HaulTruckAnalyzer, timestamp_schema_df: pd.DataFrame
+    ) -> None:
+        """analyze() must succeed on the timestamp schema with alias columns."""
+        result = analyzer.analyze(timestamp_schema_df)
+        assert result["total_records"] == 3
+        assert "bottleneck_distribution" in result
+
+    def test_missing_pct_all_zero_for_clean_data(
+        self, analyzer: HaulTruckAnalyzer, minimal_df: pd.DataFrame
+    ) -> None:
+        """A fully populated DataFrame must report 0% missing for all columns."""
+        result = analyzer.analyze(minimal_df)
+        for col, pct in result["missing_pct"].items():
+            assert pct == 0.0, f"Unexpected missing data in column '{col}'"
+
 
 # ---------------------------------------------------------------------------
-# Test 8 – to_dataframe export helper
+# Test 10 – Timestamp schema support
+# ---------------------------------------------------------------------------
+
+
+class TestTimestampSchema:
+    """Tests specifically targeting the timestamp-schema CSV format."""
+
+    def test_full_pipeline_on_sample_csv(self, analyzer: HaulTruckAnalyzer) -> None:
+        """Full run() on the new 20-row sample_data.csv must produce 20 records."""
+        sample_path = Path(__file__).parent.parent / "demo" / "sample_data.csv"
+        if not sample_path.exists():
+            pytest.skip("demo/sample_data.csv not found")
+        result = analyzer.run(str(sample_path))
+        assert result["total_records"] == 20
+
+    def test_alias_columns_resolved_after_validate(
+        self, analyzer: HaulTruckAnalyzer, timestamp_schema_df: pd.DataFrame
+    ) -> None:
+        """validate() on a timestamp-schema DataFrame must return True."""
+        result = analyzer.validate(timestamp_schema_df)
+        assert result is True
+
+    def test_productivity_computed_from_payload_tonnes(
+        self, analyzer: HaulTruckAnalyzer, timestamp_schema_df: pd.DataFrame
+    ) -> None:
+        """productivity_tph must be non-zero when payload_tonnes is present."""
+        result = analyzer.analyze(timestamp_schema_df)
+        assert result["means"].get("productivity_tph", 0.0) > 0.0
+
+    def test_fleet_summary_has_correct_truck_count(
+        self, analyzer: HaulTruckAnalyzer, timestamp_schema_df: pd.DataFrame
+    ) -> None:
+        """Fleet summary must contain one row per unique truck in the input."""
+        result = analyzer.analyze(timestamp_schema_df)
+        fleet = result.get("fleet_summary", {})
+        # TRK01 (2 trips) and TRK02 (1 trip)
+        cycle_counts = fleet.get("cycle_count", {})
+        assert len(cycle_counts) == 2
+
+    def test_material_type_column_preserved(
+        self, analyzer: HaulTruckAnalyzer, timestamp_schema_df: pd.DataFrame
+    ) -> None:
+        """Non-numeric metadata columns like material_type must survive preprocessing."""
+        preprocessed = analyzer.preprocess(timestamp_schema_df)
+        assert "material_type" in preprocessed.columns
+
+    def test_pit_name_column_preserved(
+        self, analyzer: HaulTruckAnalyzer, timestamp_schema_df: pd.DataFrame
+    ) -> None:
+        """pit_name column must survive preprocessing unchanged."""
+        preprocessed = analyzer.preprocess(timestamp_schema_df)
+        assert "pit_name" in preprocessed.columns
+
+
+# ---------------------------------------------------------------------------
+# Test 11 – to_dataframe export helper
 # ---------------------------------------------------------------------------
 
 
@@ -443,3 +945,18 @@ class TestToDataframe:
         assert len(exported) == 1
         assert exported.iloc[0]["metric"] == "total_records"
         assert exported.iloc[0]["value"] == 10
+
+    def test_nested_dict_flattened_with_dot_notation(self) -> None:
+        """Nested keys must appear as 'parent.child' metric names."""
+        analyzer = HaulTruckAnalyzer()
+        result = {"means": {"productivity_tph": 264.0}}
+        exported = analyzer.to_dataframe(result)
+        assert "means.productivity_tph" in exported["metric"].values
+
+    def test_no_rows_lost_for_complex_result(
+        self, analyzer: HaulTruckAnalyzer, minimal_df: pd.DataFrame
+    ) -> None:
+        """All top-level keys in the result must produce at least one row."""
+        result = analyzer.analyze(minimal_df)
+        exported = analyzer.to_dataframe(result)
+        assert len(exported) >= len(result)
