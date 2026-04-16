@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased] - 2026-04-17
+
+### Added
+
+- **`src/fleet_match_factor_calculator.py`**: New module implementing the
+  loader-to-truck match factor (MF) KPI for open-pit mining operations.
+  - `compute_match_factor(n_trucks, truck_cycle_time_min, loader_cycle_time_min, n_passes)`:
+    pure function returning the dimensionless MF, with full input validation.
+  - `calculate_fleet_match_factor(df, loader_cycle_time_min, ...)`: DataFrame-level
+    calculator that groups cycles by pit, counts distinct trucks, computes mean
+    cycle time per pit, and returns an immutable `MatchFactorReport`.
+  - `PitMatchResult` and `MatchFactorReport` frozen dataclasses for type-safe,
+    immutable result representation.
+  - Automatic condition labelling: `"under-trucked"` (MF < 0.90),
+    `"balanced"` (0.90–1.10), `"over-trucked"` (MF > 1.10).
+  - `MatchFactorReport.to_dataframe()` for downstream CSV/Excel export.
+  - Graceful handling of empty DataFrames, missing columns, and zero/invalid
+    cycle times (invalid rows skipped, not rejected).
+- **`tests/test_fleet_match_factor_calculator.py`**: 30 pytest tests covering
+  happy path, classification thresholds, edge cases (empty DF, single truck,
+  zero payload cycles, multi-pit weighting), immutability, determinism,
+  parametrized condition boundaries, DataFrame round-trip, and invalid-input
+  error handling.
+- **README**: Added "New: Fleet Match Factor Calculator" section with
+  step-by-step usage and standalone examples.
+
 ## [0.2.0] - 2026-04-16
 
 ### Added

@@ -184,6 +184,66 @@ Truck models represented:
 
 ---
 
+## New: Fleet Match Factor Calculator
+
+The match factor (MF) quantifies whether the loader and truck fleet are balanced.
+An MF of 1.0 is ideal; MF < 0.90 means the loader is the bottleneck
+(trucks waiting); MF > 1.10 means trucks are the bottleneck (loader sits idle).
+
+### Step-by-step usage
+
+```python
+import pandas as pd
+from src.fleet_match_factor_calculator import calculate_fleet_match_factor
+
+# 1. Load enriched cycle data
+df = pd.read_csv("demo/sample_data.csv")
+
+# 2. Compute match factor per pit
+#    loader_cycle_time_min: loader swing-and-load time per pass
+#    n_passes: passes required to fill one truck (1 for large rope shovels)
+report = calculate_fleet_match_factor(
+    df,
+    loader_cycle_time_min=12.0,
+    n_passes=1,
+    pit_col="pit_name",       # column identifying each loading zone
+    truck_col="truck_id",     # column identifying trucks
+)
+
+# 3. Inspect fleet-wide summary
+print(f"Overall match factor : {report.overall_match_factor:.3f}")
+print(f"Under-trucked pits   : {report.n_under_trucked}")
+print(f"Over-trucked pits    : {report.n_over_trucked}")
+print(f"Balanced pits        : {report.n_balanced}")
+
+# 4. Per-pit detail
+for result in report.pit_results:
+    print(
+        f"{result.pit_name}: {result.n_trucks} trucks, "
+        f"MF={result.match_factor:.3f}, condition={result.condition}"
+    )
+
+# 5. Export as DataFrame for downstream analysis
+df_report = report.to_dataframe()
+print(df_report.to_string(index=False))
+```
+
+### Standalone match factor for a single pit
+
+```python
+from src.fleet_match_factor_calculator import compute_match_factor
+
+mf = compute_match_factor(
+    n_trucks=4,
+    truck_cycle_time_min=50.0,
+    loader_cycle_time_min=12.0,
+    n_passes=1,
+)
+print(f"Match factor: {mf}")   # → 0.96 (balanced)
+```
+
+---
+
 ## Running Tests
 
 ```bash
