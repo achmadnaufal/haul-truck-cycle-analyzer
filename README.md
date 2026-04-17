@@ -244,6 +244,63 @@ print(f"Match factor: {mf}")   # → 0.96 (balanced)
 
 ---
 
+## New: Queue Time Analyzer
+
+The queue time analyzer quantifies what fraction of each truck's cycle is
+spent waiting in the loader queue, ranks the worst offenders, and tags each
+truck with a severity bucket. Excessive queueing is a leading indicator of
+over-trucking, poor shovel availability, or unbalanced dispatch.
+
+Severity buckets (queue minutes / cycle minutes):
+
+| Bucket    | Range          | Operational meaning                     |
+|-----------|----------------|------------------------------------------|
+| low       | <= 5 %         | Healthy fleet balance                    |
+| moderate  | 5 % - 15 %     | Normal congestion, monitor               |
+| high      | 15 % - 25 %    | Investigate dispatch and loader uptime   |
+| critical  | > 25 %         | Take immediate action (re-route trucks)  |
+
+### Step-by-step usage
+
+```python
+import pandas as pd
+from src.queue_time_analyzer import analyze_queue_time
+
+# 1. Load enriched cycle data
+df = pd.read_csv("demo/sample_data.csv")
+
+# 2. Run the analyzer (uses total_cycle_min by default)
+report = analyze_queue_time(df)
+
+# 3. Inspect fleet-wide queueing
+print(f"Fleet queue ratio   : {report.fleet_queue_ratio:.3f}")
+print(f"Worst-offender truck: {report.worst_truck}")
+print(f"Critical trucks     : {report.n_critical_trucks}")
+
+# 4. Per-truck detail (sorted worst first)
+for stat in report.truck_stats:
+    print(
+        f"{stat.truck_id}: {stat.n_cycles} cycles, "
+        f"avg queue {stat.avg_queue_min:.1f} min, "
+        f"ratio={stat.queue_ratio:.3f} ({stat.severity})"
+    )
+
+# 5. Export as DataFrame for dashboards
+print(report.to_dataframe().to_string(index=False))
+```
+
+### Standalone severity classification
+
+```python
+from src.queue_time_analyzer import classify_queue_severity
+
+classify_queue_severity(0.03)   # 'low'
+classify_queue_severity(0.18)   # 'high'
+classify_queue_severity(0.40)   # 'critical'
+```
+
+---
+
 ## Running Tests
 
 ```bash

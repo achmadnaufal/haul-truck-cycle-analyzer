@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased] - 2026-04-18
+
+### Added
+
+- **`src/queue_time_analyzer.py`**: New module that quantifies per-truck and
+  fleet-wide queue-time burden as a percentage of cycle time and tags each
+  truck with a severity bucket (`low`, `moderate`, `high`, `critical`).
+  - `analyze_queue_time(df, ...)`: aggregates queue and cycle minutes per
+    truck, returning an immutable `QueueTimeReport` sorted worst-first.
+  - `classify_queue_severity(queue_ratio)`: pure helper mapping a queue ratio
+    in `[0, 1]` to a severity bucket; raises `ValueError` on out-of-range or
+    NaN input.
+  - `TruckQueueStats` and `QueueTimeReport` frozen dataclasses for type-safe,
+    immutable result representation.
+  - Graceful handling of empty DataFrames, missing columns, zero/negative
+    cycle times, missing stage time, and pathological `queue > cycle` rows
+    (the latter clamped to cycle for an upper bound of 1.0).
+  - Fallback from `total_cycle_min` to `computed_cycle_min` mirroring the
+    rest of the package.
+  - `QueueTimeReport.to_dataframe()` for downstream CSV/Excel export and BI
+    dashboards.
+- **`tests/test_queue_time_analyzer.py`**: 40 pytest cases covering happy
+  path, severity boundary classification, edge cases (empty DataFrame,
+  single truck, missing stage time, all-same-route fleets, NaN values, queue
+  greater than cycle), immutability, determinism, and integration against
+  the bundled sample dataset.
+- **README**: Added "New: Queue Time Analyzer" section with severity bucket
+  table, step-by-step usage, and standalone classifier example.
+- **`src/__init__.py`**: Exposes the new public API at the package level via
+  `__all__`.
+
 ## [Unreleased] - 2026-04-17
 
 ### Added
