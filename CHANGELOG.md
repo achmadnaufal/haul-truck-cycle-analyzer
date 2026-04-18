@@ -2,7 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased] - 2026-04-18
+## [Unreleased] - 2026-04-19
+
+### Added
+
+- **`src/outlier_filter.py`**: New module to identify and remove abnormal
+  cycle records before computing KPIs.
+  - `filter_outliers(df, column, method, ...)`: returns a new DataFrame with
+    outlier rows removed plus an immutable `OutlierReport`.
+  - `flag_outliers(df, ...)`: non-destructive variant that adds a boolean
+    `is_outlier` column instead of dropping rows.
+  - Supports both IQR (Tukey fence, default multiplier 1.5) and z-score
+    (default threshold 3.0) detection strategies.
+  - Handles edge cases: empty DataFrame, constant column (zero variance),
+    NaN cells, non-numeric columns, unknown method names, and invalid
+    threshold parameters.
+  - Never mutates the input DataFrame; preserves index and column order.
+- **`tests/test_outlier_filter.py`**: 16 pytest cases covering happy path
+  for both methods, input validation, immutability, NaN handling, frozen
+  dataclass guarantees, and constant-column degeneracy.
+
+## [0.2.0] - 2026-04-18
 
 ### Added
 

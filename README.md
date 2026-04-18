@@ -28,6 +28,8 @@ with CAT 777, CAT 793F, Komatsu HD785, Liebherr T 284, and similar trucks.
   `payload_tonnes` -> `load_tonnes`, `haul_distance_km` -> `distance_km`)
 - Immutable data-flow design: no in-place mutation of input DataFrames
 - Edge-case handling: zero times, negative distances, single-truck fleets
+- Outlier filter (`src/outlier_filter.py`) with IQR and z-score strategies
+  for cleaning cycle records before KPI computation
 - 20-row realistic sample dataset (open-pit coal mining, multi-truck fleet)
 - Full pytest test suite with 80 %+ coverage target
 
