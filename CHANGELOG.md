@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased] - 2026-04-20
+
+### Added
+
+- **`src/cycle_decomposition.py`**: New module that decomposes each haul truck
+  cycle into its five canonical stages (load, haul, dump, return, queue) and
+  reports fleet-level descriptive statistics plus the dominant stage.
+  - `decompose_cycle(df)`: returns an immutable `CycleDecompositionReport`
+    with per-stage `StageStats` (mean, median, p95, min, max, std,
+    share_of_cycle) and the fleet-wide `bottleneck_stage` / `bottleneck_share`.
+  - `rank_stages_by_median(df)`: alternative ranking robust to long-tailed
+    stage distributions.
+  - Accepts both the standard schema (`loading_time_min`, ...) and the
+    timestamp schema (`load_time_min`, ...) column aliases transparently.
+  - Edge cases: empty DataFrame, all-NaN rows, missing stage columns,
+    negative durations (excluded rather than clamped to keep stats honest),
+    zero-valued stages, single-row input, duplicate truck IDs.
+  - Frozen dataclass result objects; input DataFrame is never mutated.
+  - `CycleDecompositionReport.to_dataframe()` for dashboard export.
+- **`tests/test_cycle_decomposition.py`**: 41 pytest cases covering happy
+  path, match-factor math sanity (verifying M=1 for a balanced setup),
+  fleet-level bottleneck detection, all edge cases listed above,
+  immutability guarantees, DataFrame round-trip, and end-to-end integration
+  against the refreshed `demo/sample_data.csv`.
+- **`demo/sample_data.csv`**: Regenerated 20-row open-pit sample with
+  smaller-class trucks (CAT 777E, Komatsu HD785, Volvo A60H) and a new
+  schema: `cycle_id, truck_id, truck_type, shovel_id, timestamp_start,
+  load_time_min, haul_time_min, dump_time_min, return_time_min,
+  queue_time_min, payload_tonnes, shift, material`.
+- **`src/__init__.py`**: Exposes the new cycle_decomposition API at package
+  level via `__all__`.
+
+### Changed
+
+- **README**: Rewritten with clearer installation and quickstart flow, a new
+  "Cycle Decomposition" section, updated sample-data column reference, and
+  a methodology-notes section summarising every KPI formula.
+- **`tests/test_queue_time_analyzer.py::TestSampleDataIntegration`**: Enrich
+  the raw sample CSV through `HaulTruckAnalyzer.preprocess/enrich` before
+  analysis, since the refreshed sample stores only stage times (no
+  precomputed `total_cycle_min`).
+
 ## [Unreleased] - 2026-04-19
 
 ### Added

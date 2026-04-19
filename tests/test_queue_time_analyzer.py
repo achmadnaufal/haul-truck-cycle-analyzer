@@ -348,8 +348,19 @@ class TestInvalidInputs:
 
 class TestSampleDataIntegration:
     def test_runs_on_sample_csv(self):
-        df = pd.read_csv("demo/sample_data.csv")
-        report = analyze_queue_time(df)
+        from pathlib import Path
+
+        from src.main import HaulTruckAnalyzer
+
+        sample_path = Path(__file__).parent.parent / "demo" / "sample_data.csv"
+        if not sample_path.exists():
+            pytest.skip("demo/sample_data.csv not found")
+        # Enrich via the pipeline so computed_cycle_min is populated, since the
+        # sample CSV stores stage times only (no precomputed total_cycle_min).
+        analyzer = HaulTruckAnalyzer()
+        raw = pd.read_csv(sample_path)
+        enriched = analyzer.enrich(analyzer.preprocess(raw))
+        report = analyze_queue_time(enriched)
         # Sample has 5 trucks
         assert len(report.truck_stats) == 5
         assert 0.0 < report.fleet_queue_ratio < 1.0
